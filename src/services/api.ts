@@ -45,7 +45,9 @@ export function getTodayDate(): string {
 export function parseRoomsBasedOnRules(roomNo: string | null | undefined, allNotes: string | undefined, settings: HotelSettings): string[] {
   if (!roomNo) return [];
 
-  const cleanRoomNo = roomNo.trim();
+  // Sonda gelen "S" harfini temizle (Örn: "1104S" -> "1104")
+  let cleanRoomNo = roomNo.trim().replace(/S$/i, '');
+
   const rule = settings.splitRules.find(r => r.mainRoom === cleanRoomNo);
 
   let roomsToReturn: string[] = [];
@@ -71,7 +73,7 @@ export function parseRoomsBasedOnRules(roomNo: string | null | undefined, allNot
     roomsToReturn = cleanRoomNo.split('-').map(r => r.trim());
   }
 
-  // "S" veya "T" harfi içerenleri tamamen listeden çıkar
+  // Sonda gelen S'yi zaten temizledik. Eğer hala S veya T varsa (örn: S2507) tamamen yoksay.
   return roomsToReturn.filter(r => {
     const upperR = r.toUpperCase();
     return !upperR.includes('S') && !upperR.includes('T');
@@ -163,7 +165,7 @@ export const MOCK_DATA = {
   cikisYapti: [
     { ROOMNO: "1103", RESSTATE: "4", CHECKOUT: getTodayDate() }
   ],
-  konaklayan: [
+  devamEden: [
     { ROOMNO: "5211", RESSTATE: "3", CHECKINDATE: "2026-03-20", CHECKOUTDATE: "2026-03-25", ALLNOTES: "Sadece 5211 kullanılacak" },
     { ROOMNO: "305-306", RESSTATE: "3", CHECKINDATE: "2026-03-20", CHECKOUTDATE: "2026-03-25" },
     { ROOMNO: "1104S", RESSTATE: "3" } // Filtrelenecek
