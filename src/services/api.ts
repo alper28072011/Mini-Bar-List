@@ -8,19 +8,28 @@ export interface Reservation {
   ALLNOTES?: string;
 }
 
-export interface RoomSplitRule {
-  baseRoom: string;
-  targetRooms: string[];
+export interface SplitRule {
+  id: string;
+  mainRoom: string;
+  innerRooms: string[];
 }
 
-// Şimdilik örnek 30 oda. İleride burayı otelin tüm odalarıyla doldurabilirsiniz.
-export const ALL_ROOMS: string[] = [
-  "1101", "1102", "1103", "1104", "1105", "1106", "1107", "1108", "1109", "1110",
-  "2507", "2607", "2508", "2608",
-  "4401", "4500", "4501", "4402", "4502",
-  "5211", "5213", "5215", "5217",
-  "305", "306", "307", "308"
-];
+export interface HotelSettings {
+  standardRooms: string[];
+  splitRules: SplitRule[];
+}
+
+export const DEFAULT_SETTINGS: HotelSettings = {
+  standardRooms: [
+    "1101", "1102", "1103", "1104", "1105", "1106", "1107", "1108", "1109", "1110",
+    "305", "306", "307", "308"
+  ],
+  splitRules: [
+    { id: "1", mainRoom: "2507", innerRooms: ["2507", "2607"] },
+    { id: "2", mainRoom: "4401", innerRooms: ["4401", "4500", "4501"] },
+    { id: "3", mainRoom: "5211", innerRooms: ["5211", "5213"] }
+  ]
+};
 
 /**
  * Bugünün tarihini her zaman YYYY-MM-DD formatında döndürür.
@@ -31,34 +40,38 @@ export function getTodayDate(): string {
 
 /**
  * Gelen oda numarasını ve notları analiz ederek gerçek fiziksel oda numaralarını döndürür.
+ * Akıllı Ayrıştırma Mantığı (Core Engine)
  */
-export function processRoomNumber(roomNo: string | null | undefined, allNotes: string | undefined, rules: RoomSplitRule[]): string[] {
-  // ROOMNO null veya undefined ise atla
+export function parseRoomsBasedOnRules(roomNo: string | null | undefined, allNotes: string | undefined, settings: HotelSettings): string[] {
   if (!roomNo) return [];
 
   const cleanRoomNo = roomNo.trim();
-  const rule = rules.find(r => r.baseRoom === cleanRoomNo);
+  const rule = settings.splitRules.find(r => r.mainRoom === cleanRoomNo);
 
   let roomsToReturn: string[] = [];
 
   if (rule) {
-    // Bölünebilir oda (Kural Motoru)
+    // Bölünebilir oda (Split Room) eşleşmesi
     if (!allNotes || allNotes.trim() === "") {
-      roomsToReturn = [...rule.targetRooms];
+      // Not boşsa tüm alt odaları döndür
+      roomsToReturn = [...rule.innerRooms];
     } else {
-      const mentionedRooms = rule.targetRooms.filter(room => allNotes.includes(room));
+      // Not doluysa, notun içinde geçen alt odaları bul
+      const mentionedRooms = rule.innerRooms.filter(room => allNotes.includes(room));
       if (mentionedRooms.length > 0) {
+        // Eşleşen varsa sadece onları döndür
         roomsToReturn = mentionedRooms;
       } else {
-        roomsToReturn = [...rule.targetRooms];
+        // Not var ama alakasız bir not düşülmüşse (güvenlik payı) hepsini döndür
+        roomsToReturn = [...rule.innerRooms];
       }
     }
   } else {
-    // Kural yoksa "-" işaretinden parçala
+    // Kural yoksa "-" işaretinden parçala (örn: "305-306") veya direkt kendisini döndür
     roomsToReturn = cleanRoomNo.split('-').map(r => r.trim());
   }
 
-  // "S" veya "T" harfi içerenleri filtrele
+  // "S" veya "T" harfi içerenleri tamamen listeden çıkar
   return roomsToReturn.filter(r => {
     const upperR = r.toUpperCase();
     return !upperR.includes('S') && !upperR.includes('T');
@@ -68,11 +81,11 @@ export function processRoomNumber(roomNo: string | null | undefined, allNotes: s
 /**
  * Rezervasyon listesini alıp, işlenmiş ve filtrelenmiş tekil (unique) fiziksel oda listesini döndürür.
  */
-export function getPhysicalRooms(reservations: Reservation[], rules: RoomSplitRule[]): string[] {
+export function getPhysicalRooms(reservations: Reservation[], settings: HotelSettings): string[] {
   const physicalRooms = new Set<string>();
 
   reservations.forEach(res => {
-    const rooms = processRoomNumber(res.ROOMNO, res.ALLNOTES, rules);
+    const rooms = parseRoomsBasedOnRules(res.ROOMNO, res.ALLNOTES, settings);
     rooms.forEach(r => {
       if (r) physicalRooms.add(r);
     });

@@ -1,20 +1,17 @@
 import { useState, useEffect, useMemo } from 'react';
-import { RefreshCw, AlertCircle, CheckCircle2, Settings, Save } from 'lucide-react';
+import { RefreshCw, AlertCircle, CheckCircle2, Save, Plus, Trash2 } from 'lucide-react';
+import { doc, onSnapshot, setDoc } from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType } from './firebase';
 import { 
   fetchHotelData, 
   getPhysicalRooms, 
   getTodayDate, 
-  ALL_ROOMS, 
+  DEFAULT_SETTINGS, 
   MOCK_DATA, 
   Reservation, 
-  RoomSplitRule 
+  HotelSettings,
+  SplitRule
 } from './services/api';
-
-const DEFAULT_RULES: RoomSplitRule[] = [
-  { baseRoom: "2507", targetRooms: ["2507", "2607"] },
-  { baseRoom: "4401", targetRooms: ["4401", "4500", "4501"] },
-  { baseRoom: "5211", targetRooms: ["5211", "5213"] }
-];
 
 type TabType = 'girisYapacak' | 'girisYapti' | 'cikisYapacak' | 'cikisYapti' | 'konaklayan' | 'hareketYok' | 'ayarlar';
 
@@ -25,24 +22,21 @@ const TABS: { id: TabType; label: string }[] = [
   { id: 'cikisYapti', label: 'Çıkış Yaptı' },
   { id: 'konaklayan', label: 'Konaklayan' },
   { id: 'hareketYok', label: 'Hareket Yok' },
-  { id: 'ayarlar', label: 'Ayarlar' },
+  { id: 'ayarlar', label: '⚙️ Ayarlar' },
 ];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabType>('girisYapacak');
   
-  // Rules State
-  const [rules, setRules] = useState<RoomSplitRule[]>(() => {
-    const saved = localStorage.getItem('roomSplitRules');
-    if (saved) {
-      try { return JSON.parse(saved); } catch (e) { console.error("Kayıtlı kurallar okunamadı", e); }
-    }
-    return DEFAULT_RULES;
-  });
-  
-  const [rulesInput, setRulesInput] = useState(JSON.stringify(rules, null, 2));
-  const [rulesError, setRulesError] = useState('');
-  const [rulesSuccess, setRulesSuccess] = useState(false);
+  // Settings State (Firestore)
+  const [settings, setSettings] = useState<HotelSettings>(DEFAULT_SETTINGS);
+  const [settingsLoading, setSettingsLoading] = useState(true);
+
+  // Settings UI States
+  const [standardRoomsInput, setStandardRoomsInput] = useState(settings.standardRooms.join('\n'));
+  const [newRuleMain, setNewRuleMain] = useState('');
+  const [newRuleInner, setNewRuleInner] = useState('');
+  const [settingsSuccess, setSettingsSuccess] = useState('');
 
   // Data State
   const [rawData, setRawData] = useState<{
@@ -59,23 +53,57 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [usingMockData, setUsingMockData] = useState(false);
 
+  // Load Settings from Firestore
+  useEffect(() => {
+    const docRef = doc(db, 'settings', 'hotel');
+    
+    const unsubscribe = onSnapshot(docRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data() as HotelSettings;
+        setSettings(data);
+        setStandardRoomsInput(data.standardRooms.join('\n'));
+      } else {
+        // Initialize with default settings if document doesn't exist
+        setDoc(docRef, DEFAULT_SETTINGS).catch(err => {
+          handleFirestoreError(err, OperationType.WRITE, 'settings/hotel');
+        });
+      }
+      setSettingsLoading(false);
+    }, (err) => {
+      handleFirestoreError(err, OperationType.GET, 'settings/hotel');
+      setSettingsLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
   // Processed Rooms (Derived state)
   const processedData = useMemo(() => {
-    const girisYapacak = getPhysicalRooms(rawData.girisYapacak, rules);
-    const girisYapti = getPhysicalRooms(rawData.girisYapti, rules);
-    const cikisYapacak = getPhysicalRooms(rawData.cikisYapacak, rules);
-    const cikisYapti = getPhysicalRooms(rawData.cikisYapti, rules);
-    const konaklayan = getPhysicalRooms(rawData.konaklayan, rules);
+    const girisYapacak = getPhysicalRooms(rawData.girisYapacak, settings);
+    const girisYapti = getPhysicalRooms(rawData.girisYapti, settings);
+    const cikisYapacak = getPhysicalRooms(rawData.cikisYapacak, settings);
+    const cikisYapti = getPhysicalRooms(rawData.cikisYapti, settings);
+    const konaklayan = getPhysicalRooms(rawData.konaklayan, settings);
 
-    // Hareket Yok Hesaplaması: Tüm odalar - (Giriş Yapacak + Giriş Yaptı + Çıkış Yapacak + Çıkış Yaptı + Konaklayan)
+    // Hareket Yok Hesaplaması: 
+    // 1. Toplam Fiziksel Oda Havuzu = Standart Odalar + Tüm Split Kuralı İç Odaları
+    const totalPhysicalRooms = new Set<string>([...settings.standardRooms]);
+    settings.splitRules.forEach(rule => {
+      rule.innerRooms.forEach(r => totalPhysicalRooms.add(r));
+    });
+
+    // 2. Aktif Odalar = (Giriş Yapacak + Giriş Yaptı + Çıkış Yapacak + Çıkış Yaptı + Konaklayan)
     const allActiveRooms = new Set([
       ...girisYapacak, ...girisYapti, ...cikisYapacak, ...cikisYapti, ...konaklayan
     ]);
     
-    const hareketYok = ALL_ROOMS.filter(r => !allActiveRooms.has(r)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    // 3. Hareket Yok = Toplam - Aktif
+    const hareketYok = Array.from(totalPhysicalRooms)
+      .filter(r => !allActiveRooms.has(r))
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
 
     return { girisYapacak, girisYapti, cikisYapacak, cikisYapti, konaklayan, hareketYok };
-  }, [rawData, rules]);
+  }, [rawData, settings]);
 
   const loadData = async () => {
     setLoading(true);
@@ -91,7 +119,6 @@ export default function App() {
 
       const BUGUN = getTodayDate();
       
-      // 5 Farklı Sorgunun 'Where' Koşulları
       const queries = {
         girisYapacak: [
           {"Column": "RESSTATEID", "Operator": "=", "Value": "2"},
@@ -116,7 +143,6 @@ export default function App() {
         ]
       };
 
-      // Tüm API isteklerini paralel olarak at (Performans için)
       const [resGirisYapacak, resGirisYapti, resCikisYapacak, resCikisYapti, resKonaklayan] = await Promise.all([
         fetchHotelData(queries.girisYapacak, token, "Giriş Yapacak"),
         fetchHotelData(queries.girisYapti, token, "Giriş Yaptı"),
@@ -136,9 +162,6 @@ export default function App() {
     } catch (err: any) {
       console.error(err);
       setError(err.message || "Veri çekilirken bir hata oluştu.");
-      
-      // Hata durumunda mock veriyi kullan
-      console.log("Mock veri kullanılıyor...");
       setUsingMockData(true);
       setRawData({
         girisYapacak: MOCK_DATA.girisYapacak as Reservation[],
@@ -156,25 +179,57 @@ export default function App() {
     loadData();
   }, []);
 
-  const handleSaveRules = () => {
+  // Settings Handlers (Firestore)
+  const handleSaveStandardRooms = async () => {
+    const rooms = standardRoomsInput.split(/[\n,]+/).map(r => r.trim()).filter(r => r !== '');
+    const newSettings = { ...settings, standardRooms: rooms };
+    
     try {
-      const parsed = JSON.parse(rulesInput);
-      if (!Array.isArray(parsed)) throw new Error("Kurallar bir dizi (array) olmalıdır.");
-      const isValid = parsed.every(rule => rule.baseRoom && Array.isArray(rule.targetRooms));
-      if (!isValid) throw new Error("Her kuralın 'baseRoom' (string) ve 'targetRooms' (array) alanları olmalıdır.");
-
-      setRules(parsed);
-      localStorage.setItem('roomSplitRules', JSON.stringify(parsed));
-      setRulesError('');
-      setRulesSuccess(true);
-      setTimeout(() => setRulesSuccess(false), 3000);
-    } catch (err: any) {
-      setRulesError(err.message || "Geçersiz JSON formatı.");
-      setRulesSuccess(false);
+      await setDoc(doc(db, 'settings', 'hotel'), newSettings);
+      showSuccess('Standart odalar kaydedildi!');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'settings/hotel');
     }
   };
 
-  // Ekranda gösterilecek mevcut liste
+  const handleAddRule = async () => {
+    if (!newRuleMain.trim() || !newRuleInner.trim()) return;
+    const innerRooms = newRuleInner.split(/[\n,]+/).map(r => r.trim()).filter(r => r !== '');
+    
+    const newRule: SplitRule = {
+      id: Date.now().toString(),
+      mainRoom: newRuleMain.trim(),
+      innerRooms
+    };
+    
+    const newSettings = { ...settings, splitRules: [...settings.splitRules, newRule] };
+    
+    try {
+      await setDoc(doc(db, 'settings', 'hotel'), newSettings);
+      setNewRuleMain('');
+      setNewRuleInner('');
+      showSuccess('Yeni kural eklendi!');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'settings/hotel');
+    }
+  };
+
+  const handleDeleteRule = async (id: string) => {
+    const newSettings = { ...settings, splitRules: settings.splitRules.filter(r => r.id !== id) };
+    
+    try {
+      await setDoc(doc(db, 'settings', 'hotel'), newSettings);
+      showSuccess('Kural silindi!');
+    } catch (err) {
+      handleFirestoreError(err, OperationType.WRITE, 'settings/hotel');
+    }
+  };
+
+  const showSuccess = (msg: string) => {
+    setSettingsSuccess(msg);
+    setTimeout(() => setSettingsSuccess(''), 3000);
+  };
+
   const currentList = activeTab === 'ayarlar' ? [] : processedData[activeTab];
 
   return (
@@ -226,31 +281,14 @@ export default function App() {
       <main className="flex-1 max-w-md w-full mx-auto p-4 pb-20">
         
         {/* Status Messages */}
-        {error && (
+        {error && activeTab !== 'ayarlar' && (
           <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-3 text-amber-800 text-sm">
             <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
             <div>
               <p className="font-medium">Bağlantı Hatası</p>
               <p className="mt-1 opacity-90">{error}</p>
-              {error.includes('401') && (
-                <div className="mt-2 p-2 bg-red-100 text-red-800 rounded text-xs">
-                  <p className="font-bold">💡 Çözüm Adımları:</p>
-                  <ol className="list-decimal ml-4 mt-1 space-y-1">
-                    <li>Kullandığınız Bearer Token'ın süresi dolmuş olabilir. Yeni bir token alın.</li>
-                    <li>Sol menüden <strong>Settings &gt; Secrets</strong> kısmına gidin.</li>
-                    <li><strong>VITE_HOTEL_API_TOKEN</strong> (veya VITE_API_KEY) değerini güncelleyin.</li>
-                  </ol>
-                </div>
-              )}
               <p className="mt-2 text-xs font-semibold">Şu an test verisi (Mock Data) gösteriliyor.</p>
             </div>
-          </div>
-        )}
-
-        {!error && !loading && !usingMockData && (
-          <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3 text-green-800 text-sm">
-            <CheckCircle2 className="w-5 h-5 shrink-0" />
-            <p className="font-medium">Tüm canlı veriler başarıyla çekildi.</p>
           </div>
         )}
 
@@ -288,42 +326,114 @@ export default function App() {
             </div>
           </div>
         ) : (
-          <div className="animate-in fade-in duration-300">
-            <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-              <div className="p-4 border-b border-gray-100 bg-gray-50/50">
-                <h2 className="font-semibold text-gray-700">Dinamik Kural Motoru</h2>
-                <p className="text-xs text-gray-500 mt-1">Bölünebilir odaların kurallarını JSON formatında düzenleyin. Değişiklikler anında listelere yansır.</p>
+          <div className="animate-in fade-in duration-300 space-y-6">
+            
+            {settingsSuccess && (
+              <div className="p-3 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3 text-green-800 text-sm">
+                <CheckCircle2 className="w-5 h-5 shrink-0" />
+                <p className="font-medium">{settingsSuccess}</p>
               </div>
-              
-              <div className="p-4">
-                <textarea
-                  value={rulesInput}
-                  onChange={(e) => setRulesInput(e.target.value)}
-                  className="w-full h-64 p-3 font-mono text-sm bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none resize-y"
-                  spellCheck="false"
-                />
-                
-                {rulesError && (
-                  <p className="mt-3 text-sm text-red-600 flex items-center gap-1">
-                    <AlertCircle className="w-4 h-4" /> {rulesError}
-                  </p>
-                )}
-                
-                {rulesSuccess && (
-                  <p className="mt-3 text-sm text-green-600 flex items-center gap-1">
-                    <CheckCircle2 className="w-4 h-4" /> Kurallar başarıyla kaydedildi!
-                  </p>
-                )}
+            )}
 
-                <button
-                  onClick={handleSaveRules}
-                  className="mt-4 w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2.5 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
-                >
-                  <Save className="w-4 h-4" />
-                  Kuralları Kaydet
-                </button>
+            {settingsLoading ? (
+              <div className="p-8 text-center text-gray-400">
+                <RefreshCw className="w-8 h-8 animate-spin mx-auto mb-3 opacity-50" />
+                <p>Ayarlar yükleniyor...</p>
               </div>
-            </div>
+            ) : (
+              <>
+                {/* Standart Odalar */}
+                <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+                  <div className="p-4 border-b border-gray-100 bg-gray-50/50">
+                    <h2 className="font-semibold text-gray-700">Standart Odalar</h2>
+                    <p className="text-xs text-gray-500 mt-1">Tek kapılı normal odaları virgülle veya alt alta yazarak ekleyin.</p>
+                  </div>
+                  <div className="p-4">
+                    <textarea
+                      value={standardRoomsInput}
+                      onChange={(e) => setStandardRoomsInput(e.target.value)}
+                      className="w-full h-32 p-3 font-mono text-sm bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none resize-y"
+                      placeholder="1101, 1102, 1103..."
+                      spellCheck="false"
+                    />
+                    <button
+                      onClick={handleSaveStandardRooms}
+                      className="mt-3 w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                    >
+                      <Save className="w-4 h-4" />
+                      Standart Odaları Kaydet
+                    </button>
+                  </div>
+                </div>
+
+                {/* Bölünebilir Oda Kuralları */}
+                <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+                  <div className="p-4 border-b border-gray-100 bg-gray-50/50">
+                    <h2 className="font-semibold text-gray-700">Bölünebilir Oda Kuralları (Split Rooms)</h2>
+                    <p className="text-xs text-gray-500 mt-1">Ana kapı numarasına yapılan rezervasyonları iç odalara ayırma kuralları.</p>
+                  </div>
+                  
+                  <div className="p-4 border-b border-gray-100 bg-gray-50">
+                    <h3 className="text-sm font-medium text-gray-700 mb-3">Yeni Kural Ekle</h3>
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">Ana Kapı Numarası (Main Room)</label>
+                        <input
+                          type="text"
+                          value={newRuleMain}
+                          onChange={(e) => setNewRuleMain(e.target.value)}
+                          placeholder="Örn: 4402"
+                          className="w-full p-2 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-gray-500 mb-1">İç Kapı Numaraları (Virgülle ayırın)</label>
+                        <input
+                          type="text"
+                          value={newRuleInner}
+                          onChange={(e) => setNewRuleInner(e.target.value)}
+                          placeholder="Örn: 4402, 4502"
+                          className="w-full p-2 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 outline-none"
+                        />
+                      </div>
+                      <button
+                        onClick={handleAddRule}
+                        className="w-full bg-gray-800 hover:bg-gray-900 text-white font-medium py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2"
+                      >
+                        <Plus className="w-4 h-4" />
+                        Kuralı Ekle
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="p-4">
+                    <h3 className="text-sm font-medium text-gray-700 mb-3">Mevcut Kurallar</h3>
+                    {settings.splitRules.length === 0 ? (
+                      <p className="text-sm text-gray-500 italic">Henüz kural eklenmemiş.</p>
+                    ) : (
+                      <ul className="space-y-2">
+                        {settings.splitRules.map(rule => (
+                          <li key={rule.id} className="flex items-center justify-between p-3 bg-gray-50 border border-gray-200 rounded-lg">
+                            <div>
+                              <span className="font-bold text-blue-700">{rule.mainRoom}</span>
+                              <span className="mx-2 text-gray-400">→</span>
+                              <span className="text-sm text-gray-600">{rule.innerRooms.join(', ')}</span>
+                            </div>
+                            <button
+                              onClick={() => handleDeleteRule(rule.id)}
+                              className="p-1.5 text-red-500 hover:bg-red-50 rounded-md transition-colors"
+                              title="Kuralı Sil"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         )}
 
